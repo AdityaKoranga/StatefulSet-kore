@@ -1,0 +1,211 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  annotations:
+    meta.helm.sh/release-name: sd-core
+    meta.helm.sh/release-namespace: omec
+  creationTimestamp: "2023-03-11T16:13:30Z"
+  generation: 2
+  labels:
+    app: upf
+    app.kubernetes.io/managed-by: Helm
+    release: sd-core
+  name: upf
+  namespace: omec
+  resourceVersion: "4023"
+  uid: 661f928e-2fff-4d0b-a02c-4d9e0b1b5b92
+spec:
+  podManagementPolicy: OrderedReady
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: upf
+      release: sd-core
+  serviceName: upf-headless
+  template:
+    metadata:
+      annotations:
+        k8s.v1.cni.cncf.io/networks: '[ { "name": "access-net", "interface": "access",
+          "ips": ["192.168.252.3/24"] }, { "name": "core-net", "interface": "core",
+          "ips": ["192.168.250.3/24"] } ]'
+      creationTimestamp: null
+      labels:
+        app: upf
+        release: sd-core
+    spec:
+      containers:
+      - args:
+        - bessd -f -grpc-url=0.0.0.0:10514
+        command:
+        - /bin/bash
+        - -xc
+        env:
+        - name: CONF_FILE
+          value: /etc/bess/conf/upf.json
+        image: shivank1128/upf-epc-bess
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          postStart:
+            exec:
+               command:
+              - /etc/bess/conf/bessd-poststart.sh
+        livenessProbe:
+          failureThreshold: 3
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          successThreshold: 1
+          tcpSocket:
+            port: 10514
+          timeoutSeconds: 1
+        name: bessd
+        resources:
+          limits:
+            cpu: "2"
+            hugepages-1Gi: 2Gi
+            intel.com/intel_sriov_vfio_access: "1"
+            intel.com/intel_sriov_vfio_core: "1"
+            memory: 3Gi
+          requests:
+            cpu: "2"
+            hugepages-1Gi: 2Gi
+            intel.com/intel_sriov_vfio_access: "1"
+            intel.com/intel_sriov_vfio_core: "1"
+            memory: 3Gi
+        securityContext:
+          capabilities:
+            add:
+            - IPC_LOCK
+        stdin: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        tty: true
+        volumeMounts:
+        - mountPath: /pod-share
+          name: shared-app
+        - mountPath: /dev/hugepages
+          name: hugepages
+        - mountPath: /etc/bess/conf
+          name: configs
+      - args:
+        - -i
+        - access
+        - core
+        command:
+        - /opt/bess/bessctl/conf/route_control.py
+        env:
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        image: shivank1128/upf-epc-bess
+        imagePullPolicy: IfNotPresent
+        name: routectl
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      - command:
+        - /bin/bash
+        - -xc
+        - bessctl http 0.0.0.0 8000
+        image: shivank1128/upf-epc-bess
+        imagePullPolicy: IfNotPresent
+        name: web
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      - args:
+        - -config
+        - /tmp/conf/upf.json
+        command:
+        - pfcpiface
+        image: shivank1128/upf-epc-pfcpiface
+        imagePullPolicy: IfNotPresent
+        name: pfcp-agent
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /pod-share
+          name: shared-app
+        - mountPath: /tmp/conf
+          name: configs
+      - args:
+        - |
+          while true; do
+            # arping does not work - BESS graph is still disconnected
+            #arping -c 2 -I access 192.168.252.1
+            #arping -c 2 -I core 192.168.250.1
+            ping -c 2 192.168.252.1
+            ping -c 2 192.168.250.1
+            sleep 10
+          done
+        command:
+        - sh
+        - -xc
+        image: registry.aetherproject.org/tools/busybox:stable
+        imagePullPolicy: IfNotPresent
+        name: arping
+        resources:
+          limits:
+            cpu: 128m
+            memory: 64Mi
+          requests:
+            cpu: 128m
+            memory: 64Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      dnsPolicy: ClusterFirst
+      imagePullSecrets:
+      - name: aether.registry
+      initContainers:
+      - args:
+        - ip route replace 192.168.1.0/24 via 192.168.252.1; ip route replace default
+          via 192.168.250.1 metric 110; ip route replace 192.168.1.62 via 169.254.1.1;
+          iptables -I OUTPUT -p icmp --icmp-type port-unreachable -j DROP;
+        command:
+        - sh
+        - -xec
+        image: shivank1128/upf-epc-bess
+        imagePullPolicy: IfNotPresent
+        name: bess-init
+        resources:
+          limits:
+            cpu: 128m
+            memory: 64Mi
+          requests:
+            cpu: 128m
+            memory: 64Mi
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      shareProcessNamespace: true
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - configMap:
+          defaultMode: 493
+          name: upf
+        name: configs
+      - emptyDir: {}
+        name: shared-app
+      - emptyDir:
+          medium: HugePages
+        name: hugepages
+  updateStrategy:
+    rollingUpdate:
+      partition: 0
+    type: RollingUpdate
+status:
+  availableReplicas: 1
+  collisionCount: 0
+  currentReplicas: 1
+  currentRevision: upf-666df85f97
+  observedGeneration: 2
+  readyReplicas: 1
+  replicas: 1
+  updateRevision: upf-666df85f97
+  updatedReplicas: 1
